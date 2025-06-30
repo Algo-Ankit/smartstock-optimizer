@@ -49,4 +49,24 @@ store_id,product_id,date,inventory
 101,P01,2025-06-28,50
 102,P01,2025-06-28,20
 103,P01,2025-06-28,90
+```
+Updating the Model
+To update model with your own data:
+```
+from xgboost import XGBRegressor
+import joblib
 
+model = XGBRegressor()
+model.fit(X_train, y_train)
+
+joblib.dump(model, "xgb_model.pkl")
+joblib.dump(X_train.columns.tolist(), "model_columns.pkl")
+```
+Replace the .pkl files in your repo and redeploy.
+
+
+
+Contact
+**Author:** [Ankit Anand Singh](https://github.com/Ankit2244)
+Feel free to raise issues or contribute to the project!
+Let me know if you'd also like the `requirements.txt` or a sample input CSV to match the README.
