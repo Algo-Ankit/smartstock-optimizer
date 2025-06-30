@@ -1,66 +1,126 @@
 import streamlit as st
 import pandas as pd
-from xgboost import XGBRegressor
-from sklearn.metrics import mean_squared_error
+import joblib
 import numpy as np
+import plotly.express as px
+import base64
 
-st.set_page_config(page_title="SmartStock Inventory Rebalancer", layout="wide")
-
-st.title("SmartStock Inventory Rebalancer")
-
+# --- Load model and columns ---
 @st.cache_data
-def load_model_data(data):
-    model = XGBRegressor()
-    drop_cols = [col for col in ["forecasted_demand", "product", "store_id"] if col in data.columns]
-    X = data.drop(columns=drop_cols)
-    y = data["forecasted_demand"]
-    model.fit(X, y)
-    return model
+def load_model():
+    model = joblib.load("xgb_model.pkl")
+    columns = joblib.load("model_columns.pkl")
+    return model, columns
 
-uploaded_df = st.file_uploader("Upload your_final_dataframe.csv", type="csv")
-uploaded_transfers = st.file_uploader("Upload transfer_output.csv", type="csv")
+model, model_columns = load_model()
 
-if uploaded_df is not None and uploaded_transfers is not None:
-    df = pd.read_csv(uploaded_df)
-    transfers_df = pd.read_csv(uploaded_transfers)
+# --- Page Title ---
+st.title("SmartStock Optimizer")
+st.write("Upload your inventory + sales data and get demand forecasts and optimized transfers between stores.")
 
-    model = load_model_data(df)
+# --- Upload CSV ---
+uploaded_file = st.file_uploader("Upload CSV", type="csv")
 
-    def compute_availability(data, transfers):
-        before = (data["inventory"] >= data["forecasted_demand"]).mean() * 100
-        new_data = data.copy()
-        for _, row in transfers.iterrows():
-            new_data.loc[(new_data["store_id"] == row["from_store"]) & (new_data["product"] == row["product"]), "inventory"] -= row["quantity"]
-            new_data.loc[(new_data["store_id"] == row["to_store"]) & (new_data["product"] == row["product"]), "inventory"] += row["quantity"]
-        after = (new_data["inventory"] >= new_data["forecasted_demand"]).mean() * 100
+if uploaded_file is not None:
+    user_df = pd.read_csv(uploaded_file)
+
+    # --- Preprocess uploaded data ---
+    try:
+        user_df['day_of_week'] = pd.to_datetime(user_df['date']).dt.dayofweek
+    except:
+        st.warning("Column 'date' missing or invalid. Make sure your CSV has a 'date' column.")
+
+    # Align with model input
+    X_input = user_df.copy()
+    if 'forecasted_demand' in X_input.columns:
+        X_input = X_input.drop(columns=['forecasted_demand'])
+    for col in model_columns:
+        if col not in X_input.columns:
+            X_input[col] = 0
+    X_input = X_input[model_columns]
+
+    # --- Forecast Demand ---
+    user_df['forecasted_demand'] = model.predict(X_input)
+
+    st.subheader("Forecasted Demand")
+    st.dataframe(user_df[['store_id', 'product_id', 'inventory', 'forecasted_demand']])
+
+    # --- Find Transfer Opportunities ---
+    forecasted_df = user_df.copy()
+
+    transfers = []
+    products = forecasted_df['product_id'].unique()
+
+    for product in products:
+        data = forecasted_df[forecasted_df['product_id'] == product].copy()
+        data['gap'] = data['inventory'] - data['forecasted_demand']
+
+        needs = data[data['gap'] < -3].sort_values(by='gap')  # Needs stock
+        surplus = data[data['gap'] > 3].sort_values(by='gap', ascending=False)  # Has extra stock
+
+        for i, needy in needs.iterrows():
+            for j, supplier in surplus.iterrows():
+                transfer_qty = min(abs(needy['gap']), supplier['gap'])
+                if transfer_qty <= 0:
+                    continue
+                transfers.append({
+                    'product': product,
+                    'from_store': supplier['store_id'],
+                    'to_store': needy['store_id'],
+                    'quantity': int(transfer_qty)
+                })
+                surplus.loc[j, 'gap'] -= transfer_qty
+                needs.loc[i, 'gap'] += transfer_qty
+                if needs.loc[i, 'gap'] >= -3:
+                    break
+
+    transfer_df = pd.DataFrame(transfers)
+
+    st.subheader("Suggested Transfers")
+    if not transfer_df.empty:
+        st.dataframe(transfer_df)
+        # Download button
+        csv = transfer_df.to_csv(index=False)
+        b64 = base64.b64encode(csv.encode()).decode()
+        href = f'<a href="data:file/csv;base64,{b64}" download="transfer_plan.csv">Download Transfer CSV</a>'
+        st.markdown(href, unsafe_allow_html=True)
+    else:
+        st.write("No transfers needed. Inventory is balanced.")
+
+    # --- KPIs ---
+    def compute_availability(df):
+        before = (df['inventory'] >= df['forecasted_demand']).mean() * 100
+        after_df = df.copy()
+        for _, row in transfer_df.iterrows():
+            mask_from = (after_df['store_id'] == row['from_store']) & (after_df['product_id'] == row['product'])
+            mask_to = (after_df['store_id'] == row['to_store']) & (after_df['product_id'] == row['product'])
+            after_df.loc[mask_from, 'inventory'] -= row['quantity']
+            after_df.loc[mask_to, 'inventory'] += row['quantity']
+        after = (after_df['inventory'] >= after_df['forecasted_demand']).mean() * 100
         return before, after
 
-    before_transfer, after_transfer = compute_availability(df, transfers_df)
+    before, after = compute_availability(forecasted_df)
+    st.metric("Availability Before Transfers", f"{before:.2f}%")
+    st.metric("Availability After Transfers", f"{after:.2f}%")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Availability Before Transfers", f"{before_transfer:.2f}%")
-    with col2:
-        st.metric("Availability After Transfers", f"{after_transfer:.2f}%")
+    # --- Visualizations ---
+    st.subheader("Visualizations")
 
-    st.markdown("---")
-    st.subheader("Explore Transfers by Store or Product")
+    if st.checkbox("Inventory Gap by Store (Bar Chart)"):
+        gap_df = forecasted_df.copy()
+        gap_df['gap'] = gap_df['inventory'] - gap_df['forecasted_demand']
+        fig = px.bar(gap_df, x='store_id', y='gap', color='product_id', title="Inventory - Forecasted Demand")
+        st.plotly_chart(fig)
 
-    stores = ["All"] + sorted(transfers_df["from_store"].unique().tolist() + transfers_df["to_store"].unique().tolist())
-    products = ["All"] + sorted(transfers_df["product"].unique())
+    if st.checkbox("Forecast Distribution per Product"):
+        fig = px.box(forecasted_df, x='product_id', y='forecasted_demand', points="all",
+                     title="Forecasted Demand Distribution")
+        st.plotly_chart(fig)
 
-    selected_store = st.selectbox("Filter by Store", stores)
-    selected_product = st.selectbox("Filter by Product", products)
-
-    filtered_transfers = transfers_df.copy()
-    if selected_store != "All":
-        filtered_transfers = filtered_transfers[
-            (filtered_transfers["from_store"] == selected_store) | (filtered_transfers["to_store"] == selected_store)
-        ]
-    if selected_product != "All":
-        filtered_transfers = filtered_transfers[filtered_transfers["product"] == selected_product]
-
-    st.dataframe(filtered_transfers, use_container_width=True)
+    if not transfer_df.empty and st.checkbox("Transfer Heatmap"):
+        pivot = transfer_df.pivot(index='from_store', columns='to_store', values='quantity').fillna(0)
+        fig = px.imshow(pivot, text_auto=True, title="Transfer Quantities (From → To)")
+        st.plotly_chart(fig)
 
 else:
-    st.warning("Please upload both 'your_final_dataframe.csv' and 'transfer_output.csv'.")
+    st.info("Please upload a CSV file to begin.")
