@@ -1,8 +1,8 @@
 # SmartStock Optimizer
+
 SmartStock Optimizer is a supply chain intelligence web app that uses machine learning to predict product demand and suggest inventory transfers between stores to maximize product availability and reduce overstock.
 
 Built using Python, Streamlit, and XGBoost, the tool enables store managers and analysts to make data-driven transfer decisions.
-[https://smartstock-optimizer-wy579k5xubnwdezrkryeke.streamlit.app/]
 ---
 
 ## Problem Statement
@@ -40,7 +40,7 @@ SmartStock Optimizer solves this by:
 - Transfer heatmaps between stores
 
 ---
-
+[https://smartstock-optimizer-wy579k5xubnwdezrkryeke.streamlit.app/]
 ## Sample Input Format
 
 ```csv
