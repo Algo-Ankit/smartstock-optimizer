@@ -1,4 +1,3 @@
-# smartstock-optimizer
 # SmartStock Optimizer
 
 SmartStock Optimizer is a supply chain intelligence web app that uses machine learning to predict product demand and suggest inventory transfers between stores to maximize product availability and reduce overstock.
