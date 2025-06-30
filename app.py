@@ -1,66 +1,66 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error
+import numpy as np
 
-st.set_page_config(page_title="SmartStock Optimizer", layout="wide")
+st.set_page_config(page_title="SmartStock Inventory Rebalancer", layout="wide")
+
 st.title("SmartStock Inventory Rebalancer")
 
-# Load your data
 @st.cache_data
-def load_data():
-    df = pd.read_csv("your_final_dataframe.csv")         # Inventory + forecast data
-    transfers = pd.read_csv("transfer_output.csv")       # Transfer suggestions
-    return df, transfers
+def load_model_data(data):
+    model = XGBRegressor()
+    drop_cols = [col for col in ["forecasted_demand", "product", "store_id"] if col in data.columns]
+    X = data.drop(columns=drop_cols)
+    y = data["forecasted_demand"]
+    model.fit(X, y)
+    return model
 
-df, transfers_df = load_data()
+uploaded_df = st.file_uploader("Upload your_final_dataframe.csv", type="csv")
+uploaded_transfers = st.file_uploader("Upload transfer_output.csv", type="csv")
 
-# --- KPI Section ---
-def compute_availability(df, transfers_df):
-    latest_day = df['day'].max()
-    df_day = df[df['day'] == latest_day].copy()
+if uploaded_df is not None and uploaded_transfers is not None:
+    df = pd.read_csv(uploaded_df)
+    transfers_df = pd.read_csv(uploaded_transfers)
 
-    df_day['available'] = df_day['inventory'] >= df_day['forecasted_demand']
-    before = df_day['available'].mean() * 100
+    model = load_model_data(df)
 
-    for _, row in transfers_df.iterrows():
-        from_mask = (df_day['store_id'] == row['from_store']) & (df_day['product_id'] == row['product'])
-        to_mask = (df_day['store_id'] == row['to_store']) & (df_day['product_id'] == row['product'])
+    def compute_availability(data, transfers):
+        before = (data["inventory"] >= data["forecasted_demand"]).mean() * 100
+        new_data = data.copy()
+        for _, row in transfers.iterrows():
+            new_data.loc[(new_data["store_id"] == row["from_store"]) & (new_data["product"] == row["product"]), "inventory"] -= row["quantity"]
+            new_data.loc[(new_data["store_id"] == row["to_store"]) & (new_data["product"] == row["product"]), "inventory"] += row["quantity"]
+        after = (new_data["inventory"] >= new_data["forecasted_demand"]).mean() * 100
+        return before, after
 
-        df_day.loc[from_mask, 'inventory'] -= row['quantity']
-        df_day.loc[to_mask, 'inventory'] += row['quantity']
+    before_transfer, after_transfer = compute_availability(df, transfers_df)
 
-    df_day['available'] = df_day['inventory'] >= df_day['forecasted_demand']
-    after = df_day['available'].mean() * 100
-    return before, after
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Availability Before Transfers", f"{before_transfer:.2f}%")
+    with col2:
+        st.metric("Availability After Transfers", f"{after_transfer:.2f}%")
 
-before, after = compute_availability(df, transfers_df)
+    st.markdown("---")
+    st.subheader("Explore Transfers by Store or Product")
 
-# --- KPI Display ---
-kpi1, kpi2 = st.columns(2)
-kpi1.metric("Availability Before Transfers", f"{before:.2f}%")
-kpi2.metric("Availability After Transfers", f"{after:.2f}%")
+    stores = ["All"] + sorted(transfers_df["from_store"].unique().tolist() + transfers_df["to_store"].unique().tolist())
+    products = ["All"] + sorted(transfers_df["product"].unique())
 
-st.markdown("---")
+    selected_store = st.selectbox("Filter by Store", stores)
+    selected_product = st.selectbox("Filter by Product", products)
 
-# --- Filters ---
-st.subheader("Explore Transfers by Store or Product")
+    filtered_transfers = transfers_df.copy()
+    if selected_store != "All":
+        filtered_transfers = filtered_transfers[
+            (filtered_transfers["from_store"] == selected_store) | (filtered_transfers["to_store"] == selected_store)
+        ]
+    if selected_product != "All":
+        filtered_transfers = filtered_transfers[filtered_transfers["product"] == selected_product]
 
-col1, col2 = st.columns(2)
-with col1:
-    store_filter = st.selectbox("Filter by Store", ["All"] + sorted(df['store_id'].unique()))
-with col2:
-    product_filter = st.selectbox("Filter by Product", ["All"] + sorted(df['product_id'].unique()))
+    st.dataframe(filtered_transfers, use_container_width=True)
 
-filtered = transfers_df.copy()
-if store_filter != "All":
-    filtered = filtered[(filtered['from_store'] == store_filter) | (filtered['to_store'] == store_filter)]
-if product_filter != "All":
-    filtered = filtered[filtered['product'] == product_filter]
-
-st.dataframe(filtered, use_container_width=True)
-
-st.markdown("---")
-
-# --- Raw Data Viewer ---
-with st.expander("Raw Inventory + Forecast Data (Latest Day Only)"):
-    latest_day = df['day'].max()
-    st.dataframe(df[df['day'] == latest_day], use_container_width=True)
+else:
+    st.warning("Please upload both 'your_final_dataframe.csv' and 'transfer_output.csv'.")
